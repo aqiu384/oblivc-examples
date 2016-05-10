@@ -1,0 +1,201 @@
+#include <stdio.h>
+#include <obliv.oh>
+
+#include "linReg.h"
+
+#define VAL(A, r, c) A->vals[r*A->cols + c]
+
+typedef obliv int fixed;
+typedef obliv long long int lfixed;
+
+typedef struct {
+    int rows;
+    int cols;
+    fixed *vals;
+} mat2d;
+
+void initMat2d(mat2d *A, int rows, int cols) {
+    A->rows = rows;
+    A->cols = cols;
+    A->vals = malloc(sizeof(fixed) * rows * cols);
+}
+
+void printMat2d(mat2d *A) {
+    fprintf(stderr, "Rows: %d, Cols: %d\n", A->rows, A->cols);
+    int r, c, x;
+    for (r = 0; r < A->rows; r++) {
+        for (c = 0; c < A->cols; c++) {
+            revealOblivInt(&x, VAL(A, r, c), 0);
+            fprintf(stderr, "%09.4f ", (float) x / SCALE);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
+void loadMat2d(mat2d *A, protocolIO *io, int party) {   
+    int rows, cols;
+    
+    rows = ocBroadcastInt(io->rows, party);
+    cols = ocBroadcastInt(io->cols, party);
+
+    initMat2d(A, rows, cols);
+        
+    lfixed oi;
+    int r, c, i, n = 0;
+    for (r = 0; r < rows; r++) {
+        for (c = 0; c < cols; c++) {
+            VAL(A, r, c) = feedOblivInt(io->src[n++], party);
+        }
+    }
+}
+
+void setMat2d(mat2d *A, fixed a) {
+    int r, c;
+    for (r = 0; r < A->rows; r++) {
+        for (c = 0; c < A->cols; c++) {
+            VAL(A, r, c) = a;
+        }
+    }
+}
+
+void freeMat2d(mat2d *A) {
+    free(A->vals); 
+}
+
+fixed fixedMult(fixed a, fixed b) {
+    return (fixed) ((lfixed) a * (lfixed) b / SCALE);
+}
+
+fixed fixedDiv(fixed a, fixed b) {
+    return (fixed) ((lfixed) a * SCALE / (lfixed) b);
+}
+
+fixed fixedSqrt(fixed a) {
+    fixed guess = 1 * SCALE;
+    
+    int i;
+    for (i = 0; i < 10; i++) {
+        guess -= fixedDiv(fixedMult(guess, guess) - a, 2*guess);
+    }
+    
+    return guess;
+}
+
+fixed dotCol2d(mat2d *A, int c1, int c2) {
+    int r;
+    fixed sum = 0;
+    for (r = 0; r < A->rows; r++) {
+        sum += fixedMult(VAL(A, r, c1), VAL(A, r, c2));
+    }
+    return sum;
+}
+
+fixed dotMat2d(mat2d *A, int col, mat2d *B, int row) {
+    int i;
+    fixed sum = 0;
+    for (i = 0; i < A->cols; i++) {
+        sum += fixedMult(VAL(A, row, i), VAL(B, i, col));
+    }
+    return sum;
+}
+
+void transpose(mat2d *B, mat2d *A) {
+    initMat2d(B, A->cols, A->rows);
+    int r, c;
+    for (r = 0; r < A->rows; r++) {
+        for (c = 0; c < A->cols; c++) {
+            VAL(B, c, r) = VAL(A, r, c);
+        }
+    }
+}
+
+void multMat2d(mat2d *C, mat2d *A, mat2d *B) {
+    if (A->cols != B->rows) {
+        fprintf(stderr, "Cannot multiply %d-by-%d and %d-by-%d.\n", A->rows, A->cols, B->rows, B->cols);
+        exit(1);
+    }
+    
+    initMat2d(C, A->rows, B->cols);
+    
+    int r, c, i, sum;
+    for (r = 0; r < C->rows; r++) {
+        for (c = 0; c < C->cols; c++) {
+            VAL(C, r, c) = dotMat2d(A, c, B, r);
+        }
+    }
+}
+
+void gramSchmidt(mat2d *Q, mat2d *R) {
+    if (Q->rows < Q->cols) {
+        fprintf(stderr, "%d-by-%d matrix is overdetermined.\n", Q->rows, Q->cols);
+        exit(1);
+    }
+    
+    initMat2d(R, Q->cols, Q->cols);
+    setMat2d(R, 0);
+    
+    int r, c, cp;
+    fixed sum;
+    for (c = 0; c < Q->cols; c++) {
+        sum = fixedSqrt(dotCol2d(Q, c, c));
+        VAL(R, c, c) = sum;
+                
+        for (r = 0; r < Q->rows; r++) {
+            VAL(Q, r, c) = fixedDiv(VAL(Q, r, c), sum);
+        }
+        
+        for (cp = c + 1; cp < Q->cols; cp++) {
+            sum = dotCol2d(Q, c, cp);
+            VAL(R, c, cp) = sum;
+            
+            for (r = 0; r < Q->rows; r++) {
+                VAL(Q, r, cp) -= fixedMult(VAL(Q, r, c), sum);
+            }
+        }
+    }
+}
+
+void backSubstitute(mat2d *A, mat2d *b) {
+    if (A->rows != A->cols || A->rows > b->rows || b->cols != 1) {
+        fprintf(stderr, "Cannot back substitute for %d-by-%d with  %d-by-%d.\n", A->rows, A->cols, b->rows, b->cols);
+        exit(1);
+    }
+    
+    int r, c;
+    for (r = A->rows - 1; r >= 0; r--) {
+        for (c = A->cols - 1; c > r; c--) {
+            VAL(b, r, 1) -= fixedMult(VAL(b, c, 1), VAL(A, r, c));
+        }
+        VAL(b, r, 0) = fixedDiv(VAL(b, r, 0), VAL(A, r, r));
+    }
+}
+
+void linearRegression(void *args) {
+    protocolIO *io = args;
+    int rows1, cols1, rows2, cols2;
+    
+    mat2d Q, b, R, Qt, x;
+    
+    loadMat2d(&Q, io, 1);
+    loadMat2d(&b, io, 2);
+    gramSchmidt(&Q, &R);
+    transpose(&Qt, &Q);
+    multMat2d(&x, &Qt, &b);
+    backSubstitute(&R, &x);
+    
+    int r, i;
+    mat2d *xp = &x;
+    for (r = 0; r < x.rows; r++) {
+        revealOblivInt(&i, VAL(xp, r, 0), 0);
+        io->res[r] = (float) i / SCALE;
+    }
+    io->resLen = x.rows;
+        
+    freeMat2d(&Q);
+    freeMat2d(&b);
+    freeMat2d(&R);
+    freeMat2d(&Qt);
+    freeMat2d(&x);
+
+    fprintf(stderr,"Yao gate count: %u\n", yaoGateCount());
+}

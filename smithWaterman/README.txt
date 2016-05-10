@@ -1,0 +1,2 @@
+../cycle './a.out 1 ACACACTA | ./a.out 2 AGCACACA'
+../cycle './a.out 1 ACACACTAAGCACACAACACACTA | ./a.out 2 AGCACACAACACACTAAGCACACA'
